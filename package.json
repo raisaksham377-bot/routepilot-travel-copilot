@@ -13,6 +13,7 @@
     "test:nokey": "vitest run --config vitest.config.nokey.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.133.0",
     "luxon": "^3.5.0",
     "next": "^15.1.6",
     "react": "^19.0.0",

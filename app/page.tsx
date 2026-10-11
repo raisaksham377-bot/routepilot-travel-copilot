@@ -2,11 +2,13 @@
 
 import { useMemo, useState } from 'react';
 import { decide } from '@/lib/decision';
+import type { Constraint } from '@/lib/schema/constraint';
 import type { FlightOption } from '@/lib/schema/flightOption';
 import type { PriorityRuleName, TripState } from '@/lib/schema/tripState';
 import { ALL_SCENARIOS } from '@/lib/data/scenarios';
 import { buildTripState } from '@/lib/data/build';
 import { ConstraintLedger } from './components/ConstraintLedger';
+import { NaturalLanguageInput } from './components/NaturalLanguageInput';
 import { OptionForm } from './components/OptionForm';
 import { OptionsPanel } from './components/OptionsPanel';
 import { PriorityRulePicker } from './components/PriorityRulePicker';
@@ -86,6 +88,22 @@ export default function Page() {
     setState((prev) => ({
       ...prev,
       constraints: prev.constraints.filter((_, i) => i !== index),
+    }));
+
+  /**
+   * Commits an AI-proposed constraint, but only on an explicit user click.
+   *
+   * `source` becomes 'user-edited' at this point, not 'inferred': the user has
+   * now taken ownership of the value, and the ledger should say so. The model's
+   * suggestion only ever reached here as a proposal.
+   */
+  const acceptProposedConstraint = (constraint: Constraint, asKind: 'hard' | 'soft') =>
+    setState((prev) => ({
+      ...prev,
+      constraints: [
+        ...prev.constraints.filter((c) => c.key !== constraint.key),
+        { ...constraint, kind: asKind, source: 'user-edited' } as Constraint,
+      ],
     }));
 
   const activeScenario = ALL_SCENARIOS.find((s) => s.id === scenarioId);
@@ -178,6 +196,16 @@ export default function Page() {
           <BriefPanel state={state} result={result} />
         </Panel>
       </div>
+
+      <Panel
+        title="Describe the trip (AI, optional)"
+        subtitle="Typed natural language. Explicit action only, after a disclosure. Returns proposals you confirm — nothing is applied automatically."
+      >
+        <NaturalLanguageInput
+          constraints={state.constraints}
+          onAccept={acceptProposedConstraint}
+        />
+      </Panel>
 
       <Panel
         title="Add an option by hand"

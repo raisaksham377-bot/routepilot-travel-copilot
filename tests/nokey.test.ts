@@ -45,30 +45,42 @@ describe('credential hygiene', () => {
   });
 });
 
+function walkSources(dir: string, acc: string[] = []): string[] {
+  if (!existsSync(dir)) return acc;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) walkSources(full, acc);
+    else if (/\.(ts|tsx)$/.test(entry.name)) acc.push(full);
+  }
+  return acc;
+}
+
 describe('the model id has a single source of truth', () => {
   /**
-   * Checkpoint A has no app/api directory yet. The assertion is written now so
-   * that the first AI route cannot introduce a hardcoded model string without
-   * failing the build -- switching tiers must stay a one-line env change.
+   * Checkpoint B introduces the first API route, so this check is now live
+   * rather than vacuous. Switching model tier must stay a one-line env change.
    */
   it('no API route hardcodes a claude- model string', () => {
-    const apiDir = join(PROJECT_ROOT, 'app', 'api');
-    if (!existsSync(apiDir)) {
-      expect(existsSync(apiDir)).toBe(false); // documents the current state
-      return;
-    }
-    const offenders: string[] = [];
-    const walk = (dir: string) => {
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        const full = join(dir, entry.name);
-        if (entry.isDirectory()) walk(full);
-        else if (/\.(ts|tsx)$/.test(entry.name)) {
-          if (readFileSync(full, 'utf8').includes('claude-')) offenders.push(full);
-        }
-      }
-    };
-    walk(apiDir);
+    const offenders = walkSources(join(PROJECT_ROOT, 'app', 'api')).filter((f) =>
+      readFileSync(f, 'utf8').includes('claude-'),
+    );
     expect(offenders).toEqual([]);
+  });
+
+  /**
+   * Stronger than the route-only check: the literal may appear in exactly one
+   * file in the entire project, the config module that owns it.
+   */
+  it('the model literal appears in exactly one source file project-wide', () => {
+    const sources = [
+      ...walkSources(join(PROJECT_ROOT, 'app')),
+      ...walkSources(join(PROJECT_ROOT, 'lib')),
+    ];
+    const holders = sources
+      .filter((f) => /claude-[a-z0-9-]+/.test(readFileSync(f, 'utf8')))
+      .map((f) => f.replace(PROJECT_ROOT, '').replace(/\\/g, '/'));
+
+    expect(holders).toEqual(['/lib/ai/config.ts']);
   });
 });
 
@@ -92,9 +104,45 @@ describe('the whole deterministic product works with no credentials', () => {
     expect(brief.length).toBeGreaterThan(400);
   });
 
-  it('has no API routes in Checkpoint A at all', () => {
-    // Checkpoint A is deliberately network-free. Checkpoint B adds exactly two
-    // routes, both gated and both optional.
-    expect(existsSync(join(PROJECT_ROOT, 'app', 'api'))).toBe(false);
+  /**
+   * Replaces the Checkpoint A assertion that `app/api` must not exist.
+   *
+   * That check encoded a structural fact the approved plan deliberately changes
+   * in Checkpoint B, so it could not survive unchanged. It is replaced by a
+   * strictly STRONGER one: an allowlist of exactly which routes may exist, so
+   * an unplanned or accidentally-added endpoint fails the build. The old
+   * version only ever asserted absence; this one constrains the contents.
+   */
+  it('exposes exactly the planned API routes and no others', () => {
+    const apiDir = join(PROJECT_ROOT, 'app', 'api');
+    const routes = existsSync(apiDir)
+      ? readdirSync(apiDir, { withFileTypes: true })
+          .filter((e) => e.isDirectory())
+          .map((e) => e.name)
+          .sort()
+      : [];
+
+    // Checkpoint B adds `interpret` only. `parse-options` arrives in C.
+    expect(routes).toEqual(['interpret']);
+  });
+
+  it('every API route is explicitly on the Node runtime, not edge', () => {
+    for (const file of walkSources(join(PROJECT_ROOT, 'app', 'api'))) {
+      const src = readFileSync(file, 'utf8');
+      if (/export\s+async\s+function\s+(POST|GET|PUT|PATCH|DELETE)/.test(src)) {
+        expect(src, `${file} must declare the nodejs runtime`).toContain(
+          "export const runtime = 'nodejs'",
+        );
+      }
+    }
+  });
+
+  it('no API route logs a request body, utterance or constraint value', () => {
+    for (const file of walkSources(join(PROJECT_ROOT, 'app', 'api'))) {
+      const src = readFileSync(file, 'utf8');
+      // Strip comments so prose about logging does not trip the check.
+      const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+      expect(code, `${file} must not log`).not.toMatch(/console\.(log|info|debug|warn|error)/);
+    }
   });
 });
