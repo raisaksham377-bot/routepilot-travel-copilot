@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { decide } from '@/lib/decision';
+import { applyProposedConstraint, type ApplyOutcome } from '@/lib/ai/applyProposal';
 import type { Constraint } from '@/lib/schema/constraint';
 import type { FlightOption } from '@/lib/schema/flightOption';
 import type { PriorityRuleName, TripState } from '@/lib/schema/tripState';
@@ -93,18 +94,20 @@ export default function Page() {
   /**
    * Commits an AI-proposed constraint, but only on an explicit user click.
    *
-   * `source` becomes 'user-edited' at this point, not 'inferred': the user has
-   * now taken ownership of the value, and the ledger should say so. The model's
-   * suggestion only ever reached here as a proposal.
+   * The rules live in `lib/ai/applyProposal` rather than here, so they are unit
+   * tested without a DOM: ownership transfer to 'user-edited', and the refusal
+   * to silently overwrite a value the human already supplied. This returns the
+   * outcome so the caller can render a conflict prompt instead of applying.
    */
-  const acceptProposedConstraint = (constraint: Constraint, asKind: 'hard' | 'soft') =>
-    setState((prev) => ({
-      ...prev,
-      constraints: [
-        ...prev.constraints.filter((c) => c.key !== constraint.key),
-        { ...constraint, kind: asKind, source: 'user-edited' } as Constraint,
-      ],
-    }));
+  const acceptProposedConstraint = (
+    constraint: Constraint,
+    asKind: 'hard' | 'soft',
+    options?: { overrideHumanValue?: boolean },
+  ): ApplyOutcome => {
+    const outcome = applyProposedConstraint(state, constraint, asKind, options);
+    if (outcome.outcome !== 'conflict') setState(outcome.state);
+    return outcome;
+  };
 
   const activeScenario = ALL_SCENARIOS.find((s) => s.id === scenarioId);
 

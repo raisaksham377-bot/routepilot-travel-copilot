@@ -42,8 +42,22 @@ function buildUserMessage(request: ModelCallRequest): string {
   return `${context}\n\nTraveller's description:\n${request.payload.utterance}`;
 }
 
-/** Maps SDK errors onto our transport-agnostic failure kinds. */
-function classifyError(error: unknown, Anthropic: typeof import('@anthropic-ai/sdk').default): ModelCallOutcome {
+/**
+ * Maps SDK errors onto our transport-agnostic failure kinds.
+ *
+ * Exported so it can be tested directly. This is the only logic in the project
+ * that depends on the SDK's error taxonomy, and getting it wrong is silent:
+ * a misclassified 404 would tell the user "could not reach the provider" when
+ * the real cause is a model their account cannot access -- sending them to
+ * debug the wrong thing entirely.
+ *
+ * Order matters. Checks run most-specific first, because every class below
+ * extends APIError and a broad check placed early would swallow the rest.
+ */
+export function classifyError(
+  error: unknown,
+  Anthropic: typeof import('@anthropic-ai/sdk').default,
+): ModelCallOutcome {
   if (error instanceof Anthropic.APIConnectionTimeoutError) {
     return { ok: false, kind: 'timeout', detail: 'request timed out' };
   }

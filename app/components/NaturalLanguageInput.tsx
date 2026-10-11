@@ -1,9 +1,11 @@
 'use client';
 
-import { useState } from 'react';
+import { useReducer, useState } from 'react';
 import type { Constraint } from '@/lib/schema/constraint';
 import { CONSTRAINT_LABELS } from '@/lib/schema/constraint';
 import type { InterpretResult } from '@/lib/ai/interpret';
+import type { ApplyOutcome } from '@/lib/ai/applyProposal';
+import { canSubmit, initialSessionState, sessionReducer } from '@/lib/ai/interpretSession';
 
 /**
  * Typed natural-language input.
@@ -44,22 +46,30 @@ export function NaturalLanguageInput({
   onAccept,
 }: {
   constraints: Constraint[];
-  onAccept: (constraint: Constraint, asKind: 'hard' | 'soft') => void;
+  onAccept: (
+    constraint: Constraint,
+    asKind: 'hard' | 'soft',
+    options?: { overrideHumanValue?: boolean },
+  ) => ApplyOutcome;
 }) {
-  const [text, setText] = useState('');
+  /*
+   * State lives in `sessionReducer`, not in this component.
+   *
+   * The guarantee "a failure never loses what you typed" is behavioural, and a
+   * guarantee that lives inside a component body is one nobody tests. As a
+   * reducer it is asserted directly against every action in the union -- see
+   * tests/ai-failure-recovery.test.ts.
+   */
+  const [session, dispatch] = useReducer(sessionReducer, initialSessionState);
   const [disclosureAccepted, setDisclosureAccepted] = useState<boolean | null>(null);
-  const [pending, setPending] = useState(false);
-  const [result, setResult] = useState<InterpretResult | null>(null);
-  const [transportError, setTransportError] = useState<string | null>(null);
-  const [applied, setApplied] = useState<Set<string>>(new Set());
+
+  const { text, result, transportError, appliedIndices, pendingConflict } = session;
 
   // Resolved lazily so the first paint does not depend on localStorage.
   const accepted = disclosureAccepted ?? readDisclosure();
 
   const interpret = async () => {
-    setPending(true);
-    setResult(null);
-    setTransportError(null);
+    dispatch({ type: 'submit' });
     try {
       const response = await fetch('/api/interpret', {
         method: 'POST',
@@ -67,20 +77,30 @@ export function NaturalLanguageInput({
         body: JSON.stringify({ utterance: text, constraints }),
       });
       const body = (await response.json()) as InterpretResult;
-      setResult(body);
+      dispatch({ type: 'settle', result: body });
     } catch {
-      // The text is deliberately NOT cleared here.
-      setTransportError(
-        'Could not reach the interpretation endpoint. Your text is preserved. The form below works regardless.',
-      );
-    } finally {
-      setPending(false);
+      // The text is deliberately NOT cleared -- the reducer has no action that
+      // would, except the explicit user-triggered one.
+      dispatch({
+        type: 'transport_failed',
+        message:
+          'Could not reach the interpretation endpoint. Your text is preserved. The form below works regardless.',
+      });
     }
   };
 
-  const acceptProposal = (index: number, constraint: Constraint, asKind: 'hard' | 'soft') => {
-    onAccept(constraint, asKind);
-    setApplied((prev) => new Set(prev).add(`${index}`));
+  const acceptProposal = (
+    index: number,
+    constraint: Constraint,
+    asKind: 'hard' | 'soft',
+    override = false,
+  ) => {
+    const outcome = onAccept(constraint, asKind, { overrideHumanValue: override });
+    if (outcome.outcome === 'conflict') {
+      dispatch({ type: 'conflict_raised', index, message: outcome.message });
+      return;
+    }
+    dispatch({ type: 'proposal_applied', index });
   };
 
   if (!accepted) {
@@ -135,7 +155,7 @@ export function NaturalLanguageInput({
           className="rp-input"
           rows={3}
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => dispatch({ type: 'edit_text', text: e.target.value })}
           placeholder="Needs to be in New York by midday Wednesday the 4th, business class, from London. Budget around £1,200."
         />
       </label>
@@ -145,10 +165,10 @@ export function NaturalLanguageInput({
           type="button"
           className="rp-btn"
           onClick={interpret}
-          disabled={pending || text.trim() === ''}
-          style={pending || text.trim() === '' ? { opacity: 0.55 } : undefined}
+          disabled={!canSubmit(session)}
+          style={!canSubmit(session) ? { opacity: 0.55 } : undefined}
         >
-          {pending ? 'Interpreting…' : 'Interpret with AI'}
+          {session.phase === 'pending' ? 'Interpreting…' : 'Interpret with AI'}
         </button>
         <span className="text-[11px]" style={{ color: 'var(--rp-muted)' }}>
           Sends only this text. Nothing is applied until you accept it below.
@@ -199,7 +219,8 @@ export function NaturalLanguageInput({
               </h4>
               <ul className="mt-1 flex flex-col gap-2">
                 {result.patch.accepted.map((p, i) => {
-                  const isApplied = applied.has(`${i}`);
+                  const isApplied = appliedIndices.has(i);
+                  const conflict = pendingConflict?.index === i ? pendingConflict : null;
                   const value =
                     p.constraint.key === 'arrival_deadline'
                       ? `${p.constraint.value.localDateTime.replace('T', ' ')} (${p.constraint.value.tz})`
@@ -228,6 +249,37 @@ export function NaturalLanguageInput({
                         <p className="mt-1 text-[12px]" style={{ color: 'var(--rp-accent)' }}>
                           Added to the ledger.
                         </p>
+                      ) : conflict ? (
+                        /*
+                         * A second, explicit decision. The suggestion would
+                         * overwrite a value you supplied yourself, so neither
+                         * is chosen automatically.
+                         */
+                        <div
+                          className="mt-1 rounded-md px-2 py-1.5"
+                          style={{
+                            background: 'var(--rp-warn-bg)',
+                            border: '1px solid var(--rp-warn-border)',
+                          }}
+                        >
+                          <p className="text-[12px]">{conflict.message}</p>
+                          <div className="mt-1 flex flex-wrap gap-1.5">
+                            <button
+                              type="button"
+                              className="rp-btn-secondary"
+                              onClick={() => dispatch({ type: 'conflict_resolved' })}
+                            >
+                              Keep mine
+                            </button>
+                            <button
+                              type="button"
+                              className="rp-btn-secondary"
+                              onClick={() => acceptProposal(i, p.constraint, 'soft', true)}
+                            >
+                              Replace with the suggestion
+                            </button>
+                          </div>
+                        </div>
                       ) : (
                         <div className="mt-1 flex flex-wrap gap-1.5">
                           <button

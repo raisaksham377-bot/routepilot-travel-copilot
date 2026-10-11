@@ -15,10 +15,15 @@ export default defineConfig({
   resolve: {
     alias: { '@': projectRoot },
   },
+  // Matches vitest.config.ts: tsconfig's `jsx: "preserve"` is for Next, not esbuild.
+  esbuild: { jsx: 'automatic' },
   test: {
     environment: 'node',
-    include: ['tests/**/*.test.ts'],
-    setupFiles: ['./tests/setup.nokey.ts'],
+    include: ['tests/**/*.test.{ts,tsx}'],
+    // Network guard first, then credential clearing. Together these make the
+    // no-key suite prove two things at once: nothing resolves a credential,
+    // and nothing could reach a provider even if it did.
+    setupFiles: ['./tests/setup.no-network.ts', './tests/setup.nokey.ts'],
     testTimeout: 5000,
   },
 });
