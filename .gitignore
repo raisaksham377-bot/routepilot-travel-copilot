@@ -1,0 +1,40 @@
+node_modules/
+.next/
+out/
+build/
+dist/
+coverage/
+
+# Local environment files. Only .env.example is committed, and it holds names only.
+.env
+.env.local
+.env*.local
+
+# Credentials and keys. No file matching these should ever exist in this project
+# -- it has no field for a credential -- but an accidental download or an
+# exported key must not be committable.
+*.pem
+*.key
+*.p12
+*.pfx
+*.cer
+secrets.json
+credentials.json
+.npmrc
+
+# Local-only tooling configuration (machine-specific, not shared project config)
+.claude/settings.local.json
+
+# Deploy platform state
+.vercel/
+.netlify/
+
+*.tsbuildinfo
+next-env.d.ts
+
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
+.vscode/
+.idea/
