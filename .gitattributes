@@ -1,0 +1,11 @@
+# Normalise line endings so the repository is byte-identical on every platform.
+#
+# text=auto lets Git detect text files and store them with LF in the repository.
+# eol=lf pins the working copy to LF as well, overriding core.autocrlf (which is
+# set to `true` system-wide on the Windows machine this was authored on).
+#
+# Without this, a fresh clone on Windows gets CRLF working copies while the
+# repository holds LF, so the next `git add` renormalises and emits confusing
+# whole-file diffs that contain no actual change. Pinning it here keeps diffs
+# meaningful for anyone who clones the project or runs it in CI.
+* text=auto eol=lf
