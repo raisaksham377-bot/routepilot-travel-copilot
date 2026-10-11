@@ -1,11 +1,28 @@
 'use client';
 
-import { useReducer, useState } from 'react';
+import { useCallback, useReducer, useRef, useState } from 'react';
 import type { Constraint } from '@/lib/schema/constraint';
 import { CONSTRAINT_LABELS } from '@/lib/schema/constraint';
 import type { InterpretResult } from '@/lib/ai/interpret';
 import type { ApplyOutcome } from '@/lib/ai/applyProposal';
 import { canSubmit, initialSessionState, sessionReducer } from '@/lib/ai/interpretSession';
+import {
+  isSpeechRecognitionSupported,
+  SPEECH_ACCURACY_CAVEAT,
+  SPEECH_LANGUAGES,
+  speechLanguageNote,
+  startSpeechSession,
+  type SpeechLanguageCode,
+  type SpeechRecognitionConstructor,
+  type SpeechSession,
+} from '@/lib/voice/speechRecognition';
+import {
+  canStartListening,
+  initialVoiceState,
+  isListening,
+  VOICE_PHASE_LABELS,
+  voiceReducer,
+} from '@/lib/voice/voiceSession';
 
 /**
  * Typed natural-language input.
@@ -23,27 +40,52 @@ import { canSubmit, initialSessionState, sessionReducer } from '@/lib/ai/interpr
  */
 
 const AI_DISCLOSURE_KEY = 'routepilot.disclosure.ai.v1';
+/**
+ * The voice disclosure is a SEPARATE key, deliberately.
+ *
+ * They are different recipients and different data: AI interpretation sends
+ * text to Anthropic through this app's own server, while speech recognition
+ * sends raw AUDIO to the browser's own provider without passing through this
+ * app at all. A user may reasonably accept one and refuse the other, so
+ * accepting either must never imply the other.
+ */
+const VOICE_DISCLOSURE_KEY = 'routepilot.disclosure.voice.v1';
 
-function readDisclosure(): boolean {
+function readDisclosureFlag(key: string): boolean {
   try {
-    return localStorage.getItem(AI_DISCLOSURE_KEY) === 'accepted';
+    return localStorage.getItem(key) === 'accepted';
   } catch {
     // Private windows and blocked site data both throw. Treat as not accepted.
     return false;
   }
 }
 
-function writeDisclosure(): void {
+function writeDisclosureFlag(key: string): void {
   try {
-    localStorage.setItem(AI_DISCLOSURE_KEY, 'accepted');
+    localStorage.setItem(key, 'accepted');
   } catch {
     // Non-fatal: the disclosure simply shows again next time.
   }
 }
 
+function readDisclosure(): boolean {
+  return readDisclosureFlag(AI_DISCLOSURE_KEY);
+}
+
+function writeDisclosure(): void {
+  writeDisclosureFlag(AI_DISCLOSURE_KEY);
+}
+
 export function NaturalLanguageInput({
   constraints,
   onAccept,
+  /**
+   * Injectable SpeechRecognition constructor. Production leaves it undefined
+   * so the real browser API is resolved; tests pass a fake, which is the only
+   * way the permission-denied, no-speech and recognition-error paths can be
+   * covered without a real microphone.
+   */
+  speechRecognitionCtor,
 }: {
   constraints: Constraint[];
   onAccept: (
@@ -51,6 +93,7 @@ export function NaturalLanguageInput({
     asKind: 'hard' | 'soft',
     options?: { overrideHumanValue?: boolean },
   ) => ApplyOutcome;
+  speechRecognitionCtor?: SpeechRecognitionConstructor | null;
 }) {
   /*
    * State lives in `sessionReducer`, not in this component.
@@ -67,6 +110,80 @@ export function NaturalLanguageInput({
 
   // Resolved lazily so the first paint does not depend on localStorage.
   const accepted = disclosureAccepted ?? readDisclosure();
+
+  /* ---------------------------- voice input ---------------------------- */
+
+  /**
+   * Feature detection decides the initial phase. A browser without the API
+   * starts (and stays) `unsupported`, and the microphone control renders as a
+   * disabled explanation rather than a button that cannot work.
+   */
+  const injected = speechRecognitionCtor !== undefined;
+  const supported = injected ? speechRecognitionCtor !== null : isSpeechRecognitionSupported();
+
+  const [voice, voiceDispatch] = useReducer(voiceReducer, initialVoiceState(supported));
+  const [voiceDisclosureAccepted, setVoiceDisclosureAccepted] = useState<boolean | null>(null);
+  const [voiceDisclosurePending, setVoiceDisclosurePending] = useState(false);
+  const sessionRef = useRef<SpeechSession | null>(null);
+
+  const voiceAccepted = voiceDisclosureAccepted ?? readDisclosureFlag(VOICE_DISCLOSURE_KEY);
+  const { language } = voice;
+
+  const beginListening = useCallback(() => {
+    const speech = startSpeechSession(
+      {
+        onStart: () => voiceDispatch({ type: 'listening_started' }),
+        onTranscript: (transcript, isFinal) => {
+          if (!isFinal) {
+            voiceDispatch({ type: 'interim_transcript', text: transcript });
+            return;
+          }
+          /*
+           * A FINAL segment goes into the existing editable text via the
+           * session reducer -- the same state the keyboard writes to. That is
+           * what makes the textarea the transcript editor, and what guarantees
+           * a transcript can never reach a constraint without passing through
+           * Interpret and explicit confirmation.
+           *
+           * `append_transcript` rather than computing the new text here: these
+           * handlers are registered once per session, so a closure over `text`
+           * would be stale by the second phrase and would replace instead of
+           * append. The reducer reads current state, so it cannot be.
+           */
+          voiceDispatch({ type: 'final_transcript' });
+          dispatch({ type: 'append_transcript', text: transcript });
+        },
+        onError: (kind) => voiceDispatch({ type: 'recognition_error', kind }),
+        onEnd: () => {
+          sessionRef.current = null;
+          voiceDispatch({ type: 'recognition_ended' });
+        },
+      },
+      // Injected ctor wins; otherwise let the adapter resolve the real API.
+      injected ? speechRecognitionCtor : undefined,
+      // The selected recognition language, read at session start. The Web
+      // Speech API takes one language per session and cannot be changed
+      // mid-recording, which is why the selector is disabled while listening.
+      language,
+    );
+    sessionRef.current = speech;
+    // `text` is deliberately NOT a dependency: nothing in here reads it any
+    // more, which is precisely what removes the stale-closure hazard.
+  }, [injected, speechRecognitionCtor, language]);
+
+  const onMicrophoneClick = () => {
+    if (isListening(voice)) {
+      sessionRef.current?.stop();
+      voiceDispatch({ type: 'user_stopped' });
+      return;
+    }
+    // The voice disclosure gates the FIRST capture, separately from the AI one.
+    if (!voiceAccepted) {
+      setVoiceDisclosurePending(true);
+      return;
+    }
+    beginListening();
+  };
 
   const interpret = async () => {
     dispatch({ type: 'submit' });
@@ -147,9 +264,139 @@ export function NaturalLanguageInput({
 
   return (
     <div className="flex flex-col gap-3 text-sm">
+      {/* ------------------------- voice disclosure ------------------------- */}
+      {voiceDisclosurePending && !voiceAccepted && (
+        <div
+          className="flex flex-col gap-2 rounded-md px-3 py-2"
+          style={{ background: 'var(--rp-warn-bg)', border: '1px solid var(--rp-warn-border)' }}
+        >
+          <h4 className="font-medium">Before using the microphone</h4>
+          <p>
+            Speech recognition is provided by <strong>your browser</strong>, not by this app. In
+            Chrome and Edge the <strong>audio of what you say is sent to the browser&rsquo;s speech
+            service</strong> (Google&rsquo;s) to be transcribed.
+          </p>
+          <p>
+            That audio does not pass through this application, so it cannot be redacted or
+            restricted here. This is separate from AI interpretation, which sends text to
+            Anthropic &mdash; accepting one does not accept the other.
+          </p>
+          <p>Only the resulting text is used, and you can edit it before anything is sent.</p>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="rp-btn"
+              onClick={() => {
+                writeDisclosureFlag(VOICE_DISCLOSURE_KEY);
+                setVoiceDisclosureAccepted(true);
+                setVoiceDisclosurePending(false);
+                beginListening();
+              }}
+            >
+              I understand &mdash; start listening
+            </button>
+            <button
+              type="button"
+              className="rp-btn-secondary"
+              onClick={() => setVoiceDisclosurePending(false)}
+            >
+              No thanks, I&rsquo;ll type
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ------------------------ microphone control ------------------------ */}
+      <div className="flex flex-wrap items-center gap-2">
+        {voice.phase === 'unsupported' ? (
+          <p className="text-[12px]" style={{ color: 'var(--rp-muted)' }}>
+            <strong>Voice input is not available in this browser.</strong> Chrome or Edge support
+            it; Firefox does not, and Safari blocks it inside an installed web app. Type the
+            description instead &mdash; nothing else changes.
+          </p>
+        ) : (
+          <>
+            <button
+              type="button"
+              className="rp-btn-secondary"
+              aria-pressed={isListening(voice)}
+              onClick={onMicrophoneClick}
+              disabled={!isListening(voice) && !canStartListening(voice)}
+            >
+              {isListening(voice) ? '■ Stop listening' : '● Speak'}
+            </button>
+            <span
+              className="text-[11px]"
+              style={{ color: isListening(voice) ? 'var(--rp-accent)' : 'var(--rp-muted)' }}
+              role="status"
+            >
+              {VOICE_PHASE_LABELS[voice.phase]}
+            </span>
+
+            <label className="flex items-center gap-1 text-[11px]" style={{ color: 'var(--rp-muted)' }}>
+              <span>Speak in</span>
+              <select
+                className="rp-input"
+                style={{ width: 'auto', padding: '0.2rem 0.35rem' }}
+                value={language}
+                aria-label="Speech recognition language"
+                /* One language per recording: the API cannot switch mid-session. */
+                disabled={isListening(voice)}
+                onChange={(e) =>
+                  voiceDispatch({
+                    type: 'language_changed',
+                    language: e.target.value as SpeechLanguageCode,
+                  })
+                }
+              >
+                {SPEECH_LANGUAGES.map((l) => (
+                  <option key={l.code} value={l.code}>
+                    {l.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </>
+        )}
+      </div>
+
+      {voice.phase !== 'unsupported' && (
+        <p className="text-[11px]" style={{ color: 'var(--rp-muted)' }}>
+          {speechLanguageNote(language)} {SPEECH_ACCURACY_CAVEAT}
+        </p>
+      )}
+
+      {/* Live interim words. Display only -- never merged into the text. */}
+      {voice.interim !== '' && (
+        <p className="text-[12px] italic" style={{ color: 'var(--rp-muted)' }}>
+          hearing: &ldquo;{voice.interim}&rdquo;{' '}
+          <span className="not-italic">(not added until the phrase completes)</span>
+        </p>
+      )}
+
+      {voice.error !== null && (
+        <div
+          className="flex flex-wrap items-center gap-2 rounded-md px-2 py-1.5"
+          style={{
+            background: 'var(--rp-excluded-bg)',
+            border: '1px solid var(--rp-excluded-border)',
+          }}
+        >
+          <p className="text-[12px]">{voice.error.message}</p>
+          <button
+            type="button"
+            className="rp-btn-secondary"
+            onClick={() => voiceDispatch({ type: 'dismiss_error' })}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       <label className="flex flex-col gap-1">
         <span className="text-[11px]" style={{ color: 'var(--rp-muted)' }}>
           Describe the trip in your own words
+          {voice.phase === 'stopped' && ' — edit the transcript below before interpreting'}
         </span>
         <textarea
           className="rp-input"

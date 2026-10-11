@@ -40,6 +40,20 @@ export const initialSessionState: SessionState = {
 
 export type SessionAction =
   | { type: 'edit_text'; text: string }
+  /**
+   * Appends a completed voice transcript segment.
+   *
+   * A dedicated action rather than the caller computing `text + segment` and
+   * dispatching `edit_text`, for a specific reason: the speech handlers are
+   * registered once when a session starts, so a closure over `text` goes stale
+   * the moment the first segment lands. The second phrase then appends to an
+   * empty string and silently REPLACES the first. Reading current state inside
+   * the reducer makes that impossible.
+   *
+   * Also the right place to drop an empty transcript: a session that heard
+   * nothing must not disturb what is already there.
+   */
+  | { type: 'append_transcript'; text: string }
   | { type: 'submit' }
   | { type: 'settle'; result: InterpretResult }
   | { type: 'transport_failed'; message: string }
@@ -53,6 +67,14 @@ export function sessionReducer(state: SessionState, action: SessionAction): Sess
   switch (action.type) {
     case 'edit_text':
       return { ...state, text: action.text };
+
+    case 'append_transcript': {
+      const addition = action.text.trim();
+      // An empty or whitespace-only transcript changes nothing at all.
+      if (addition === '') return state;
+      const current = state.text.trim();
+      return { ...state, text: current === '' ? addition : `${current} ${addition}` };
+    }
 
     case 'submit':
       // Previous results are cleared so stale proposals cannot be accepted

@@ -17,7 +17,22 @@ import type { ModelCallRequest, ModelCallOutcome, ModelCaller } from './interpre
  * models. `output_config.format` is the supported way to constrain shape.
  */
 
-const SYSTEM_PROMPT = `You extract travel constraints from a short description of a business trip.
+/**
+ * The extraction prompt. Exported so its instructions can be asserted in tests.
+ *
+ * It is a PROMPT, not a guarantee. Tests can prove the instructions are
+ * present and that the pipeline passes an utterance through unchanged; they
+ * cannot prove a model obeys them, and no test here claims live multilingual
+ * accuracy.
+ *
+ * Multilingual handling is reading-only: there is deliberately NO translation,
+ * transliteration or normalisation step anywhere in the pipeline. The
+ * traveller's bytes reach the model exactly as typed or dictated, because an
+ * unverified preprocessing step would be a second place for meaning to be
+ * silently altered -- and a mistranslation would be invisible in the ledger,
+ * which shows the extracted constraint rather than the round trip.
+ */
+export const SYSTEM_PROMPT = `You extract travel constraints from a short description of a business trip.
 
 You are given the traveller's words and a list of which constraint keys are already recorded (keys and whether each is firm or a preference -- never their values).
 
@@ -29,9 +44,41 @@ Rules:
 - Ask at most two clarifying questions, and only about information that is genuinely missing.
 - Put anything the traveller mentioned that does not map to a supported constraint into unmapped, rather than discarding it.
 
+LANGUAGE
+
+The traveller may write or dictate in any of these, and you must read all of them:
+- English.
+- Hindi in Devanagari script, for example "मुझे बुधवार दोपहर तक न्यूयॉर्क पहुंचना है".
+- Hindi and English mixed together and typed in Latin script, commonly called Hinglish, for example "mujhe Wednesday dopahar tak New York pahunchna hai, business class".
+- A mixture of scripts in one message.
+
+Language rules:
+- Do NOT translate, transliterate, summarise or rewrite the traveller's words.
+- The "evidence" field must quote the traveller's OWN words, in their ORIGINAL script, exactly as they wrote them. Do not render Devanagari into Latin letters, or Hinglish into formal English.
+- FIELD VALUES are always normalised machine values regardless of the input language: airport codes as three uppercase Latin letters, cabin as one of economy / premium_economy / business / first, numbers as digits, dates as YYYY-MM-DDTHH:MM, timezones as IANA identifiers such as Asia/Kolkata.
+- If you cannot confidently read what was written, do not guess. Say so in clarifyingQuestions.
+
+AMBIGUITY THAT IS EASY TO GET WRONG
+
+Some common words do not determine a date or time on their own. Treat these as MISSING information and ask, rather than choosing an interpretation:
+- "kal" / "कल" means both tomorrow AND yesterday in Hindi, depending on context. Never resolve it to a date.
+- "parso" / "परसों" means both the day after tomorrow AND the day before yesterday. Never resolve it to a date.
+- "subah", "dopahar", "shaam", "raat" (morning, afternoon, evening, night) and their Devanagari forms indicate a part of the day, not a clock time. They do not by themselves give you "HH:MM".
+- A bare weekday ("Wednesday", "बुधवार") does not give you a calendar date, and a bare clock time does not give you a timezone.
+
+In every one of those cases the correct output is no proposal for that constraint plus a clarifying question. A plausible-looking date you inferred is worse than an admitted gap, because a human will approve it without realising it was guessed.
+
 You are proposing, not deciding. A human reviews everything you return.`;
 
-function buildUserMessage(request: ModelCallRequest): string {
+/**
+ * Builds the user message.
+ *
+ * The utterance is interpolated VERBATIM. There is no translation step, no
+ * transliteration, no case folding and no Unicode normalisation -- Devanagari,
+ * Latin and mixed-script text all reach the model as the traveller produced
+ * them. Exported so a test can assert that byte-for-byte.
+ */
+export function buildUserMessage(request: ModelCallRequest): string {
   const context =
     request.payload.constraintContext.length === 0
       ? 'No constraints are recorded yet.'

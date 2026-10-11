@@ -83,15 +83,74 @@ describe('the typed text survives every failure', () => {
       { type: 'conflict_raised', index: 0, message: 'x' },
       { type: 'conflict_resolved' },
       { type: 'edit_text', text: TYPED },
+      // Added with Checkpoint B3. Enumerating every action is the point of
+      // this test, so a new one must be listed here or the exhaustiveness
+      // claim quietly becomes false.
+      { type: 'append_transcript', text: 'dictated words' },
     ];
 
     for (const action of everyAction) {
-      expect(sessionReducer(populated, action).text, `${action.type} must not clear text`).toBe(
+      const next = sessionReducer(populated, action).text;
+      // The invariant is that nothing is LOST. Most actions leave the text
+      // untouched; `append_transcript` grows it, which is still not losing it.
+      expect(next, `${action.type} must not clear text`).not.toBe('');
+      expect(next, `${action.type} must not discard what was typed`).toContain(TYPED);
+    }
+
+    // Everything except append leaves it byte-identical.
+    for (const action of everyAction.filter((a) => a.type !== 'append_transcript')) {
+      expect(sessionReducer(populated, action).text, `${action.type} must not alter text`).toBe(
         TYPED,
       );
     }
 
     expect(sessionReducer(populated, { type: 'clear_text' }).text).toBe('');
+  });
+
+  /**
+   * Regression guard for a real bug found by the DOM tests in B3.
+   *
+   * The component originally computed the new text in the speech handler,
+   * which closed over `text`. Those handlers are registered once per
+   * recognition session, so by the second phrase the closure was stale and
+   * saw `text === ''` -- appending to nothing, which silently REPLACED the
+   * first phrase. Computing it in the reducer reads current state, so the
+   * class of bug cannot recur.
+   */
+  it('appends successive transcript segments instead of replacing them', () => {
+    let state = run([{ type: 'append_transcript', text: 'New York by Wednesday' }]);
+    expect(state.text).toBe('New York by Wednesday');
+
+    state = sessionReducer(state, { type: 'append_transcript', text: 'business class' });
+    expect(state.text).toBe('New York by Wednesday business class');
+
+    state = sessionReducer(state, { type: 'append_transcript', text: 'from London' });
+    expect(state.text).toBe('New York by Wednesday business class from London');
+  });
+
+  it('appends to text the user typed, without disturbing it', () => {
+    const state = run([
+      { type: 'edit_text', text: 'typed first' },
+      { type: 'append_transcript', text: 'then dictated' },
+    ]);
+    expect(state.text).toBe('typed first then dictated');
+  });
+
+  it('an empty or whitespace-only transcript changes nothing', () => {
+    const populated = run([{ type: 'edit_text', text: TYPED }]);
+    for (const empty of ['', '   ', '\n\t ']) {
+      expect(sessionReducer(populated, { type: 'append_transcript', text: empty })).toEqual(
+        populated,
+      );
+    }
+  });
+
+  it('trims each segment so appending cannot produce ragged spacing', () => {
+    const state = run([
+      { type: 'append_transcript', text: '  New York  ' },
+      { type: 'append_transcript', text: '  Wednesday  ' },
+    ]);
+    expect(state.text).toBe('New York Wednesday');
   });
 
   it('resubmitting clears stale proposals but not the text', () => {
